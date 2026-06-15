@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Board Game Search — India</title>
+<style>
+  :root {
+    --bg: #f7f6f3;
+    --card: #ffffff;
+    --border: #e5e3de;
+    --text: #1a1a18;
+    --muted: #6b6a65;
+    --accent: #2d6a4f;
+    --accent-light: #e8f5ef;
+    --danger: #c0392b;
+    --tag-bg: #eef2ff;
+    --tag-text: #3730a3;
+    --price-bg: #f0fdf4;
+    --price-text: #15803d;
+    --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a; --card: #1e1e24; --border: #2e2e38;
+      --text: #ebebeb; --muted: #9a9a9a; --accent: #4ade80;
+      --accent-light: #14290d; --tag-bg: #1e1e40; --tag-text: #818cf8;
+      --price-bg: #0f2a1a; --price-text: #4ade80;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  /* ── Header ── */
+  header { background: var(--card); border-bottom: 1px solid var(--border);
+    padding: 14px 20px; position: sticky; top: 0; z-index: 100; }
+  .header-inner { max-width: 900px; margin: 0 auto;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .logo { font-size: 22px; flex-shrink: 0; }
+  .brand { font-size: 16px; font-weight: 600; color: var(--text); white-space: nowrap; }
+  .search-bar { display: flex; gap: 8px; flex: 1; min-width: 240px; }
+  .search-bar input {
+    flex: 1; padding: 9px 14px; font-size: 15px;
+    border: 1.5px solid var(--border); border-radius: 8px;
+    background: var(--bg); color: var(--text); outline: none;
+    transition: border-color 0.15s;
+  }
+  .search-bar input:focus { border-color: var(--accent); }
+  .search-bar button {
+    padding: 9px 18px; background: var(--accent); color: white;
+    border: none; border-radius: 8px; font-size: 14px; font-weight: 600;
+    cursor: pointer; white-space: nowrap; transition: opacity 0.15s;
+  }
+  .search-bar button:hover { opacity: 0.88; }
+  .search-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ── Main ── */
+  main { max-width: 900px; margin: 0 auto; padding: 20px 16px; }
+
+  /* ── Site filter ── */
+  .filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px;
+    align-items: center; }
+  .filter-label { font-size: 12px; color: var(--muted); font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.04em; }
+  .site-pill {
+    padding: 5px 12px; border-radius: 20px; font-size: 13px;
+    border: 1.5px solid var(--border); cursor: pointer;
+    background: var(--card); color: var(--muted); transition: all 0.15s;
+    user-select: none;
+  }
+  .site-pill.active { color: white; border-color: transparent; }
+  .site-pill:hover { opacity: 0.85; }
+
+  /* ── Quick searches ── */
+  #home-panel { }
+  .section-title { font-size: 12px; color: var(--muted); font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 24px; }
+  .chip {
+    padding: 6px 14px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 20px; font-size: 13px; cursor: pointer; color: var(--text);
+    transition: all 0.13s;
+  }
+  .chip:hover { background: var(--accent-light); border-color: var(--accent); color: var(--accent); }
+
+  /* ── Results panel ── */
+  #results-panel { display: none; }
+  .results-meta { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
+  .results-meta strong { color: var(--text); }
+
+  /* ── Sort bar ── */
+  .sort-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 16px;
+    flex-wrap: wrap; }
+  .sort-bar label { font-size: 13px; color: var(--muted); }
+  .sort-bar select { font-size: 13px; padding: 5px 10px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; }
+
+  /* ── Site sections ── */
+  .site-section { margin-bottom: 28px; }
+  .site-header {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  }
+  .site-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .site-header-name { font-size: 15px; font-weight: 600; }
+  .site-header-count { font-size: 12px; color: var(--muted); }
+  .site-header-link { font-size: 12px; color: var(--accent); text-decoration: none;
+    margin-left: auto; }
+  .site-header-link:hover { text-decoration: underline; }
+
+  /* ── Product grid ── */
+  .product-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 12px;
+  }
+  @media (max-width: 480px) {
+    .product-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  }
+  .product-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    overflow: hidden; transition: box-shadow 0.15s, transform 0.12s;
+    display: flex; flex-direction: column; cursor: pointer;
+    text-decoration: none; color: inherit;
+  }
+  .product-card:hover {
+    box-shadow: var(--shadow); transform: translateY(-2px);
+    border-color: #ccc;
+  }
+  .product-img {
+    width: 100%; aspect-ratio: 1 / 1; object-fit: contain;
+    background: #f9f9f7; padding: 8px;
+  }
+  .product-img-placeholder {
+    width: 100%; aspect-ratio: 1 / 1; background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 36px;
+  }
+  .product-info { padding: 10px 11px 12px; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+  .product-title { font-size: 13px; line-height: 1.4; font-weight: 500; color: var(--text);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .product-price {
+    font-size: 15px; font-weight: 700; color: var(--price-text);
+    background: var(--price-bg); padding: 3px 8px; border-radius: 6px;
+    display: inline-block; align-self: flex-start;
+  }
+  .product-price.no-price {
+    font-size: 12px; font-weight: 400; color: var(--muted);
+    background: transparent; padding: 0;
+  }
+  .product-site-tag {
+    font-size: 11px; color: var(--tag-text); background: var(--tag-bg);
+    padding: 2px 7px; border-radius: 10px; align-self: flex-start;
+  }
+
+  /* ── All results (combined) ── */
+  #all-results-grid { }
+
+  /* ── Loading / Error ── */
+  .loading-wrap { text-align: center; padding: 40px 20px; }
+  .spinner {
+    width: 36px; height: 36px; border: 3px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin 0.75s linear infinite; margin: 0 auto 14px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text { font-size: 14px; color: var(--muted); }
+  .loading-sites { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+  .error-card {
+    background: #fff5f5; border: 1px solid #fed7d7; border-radius: 10px;
+    padding: 14px 16px; font-size: 13px; color: var(--danger); margin-bottom: 12px;
+  }
+  .no-results { font-size: 14px; color: var(--muted); padding: 12px 0; }
+
+  /* ── Price badge on site header ── */
+  .price-range-badge {
+    font-size: 11px; color: var(--price-text); background: var(--price-bg);
+    padding: 2px 8px; border-radius: 10px; margin-left: 6px;
+  }
+
+  /* ── View toggle ── */
+  .view-toggle { display: flex; gap: 4px; margin-left: auto; }
+  .view-btn {
+    padding: 5px 10px; border: 1px solid var(--border); background: var(--card);
+    border-radius: 6px; font-size: 13px; cursor: pointer; color: var(--muted);
+  }
+  .view-btn.active { background: var(--accent); color: white; border-color: transparent; }
+
+  /* ── Footer ── */
+  footer { text-align: center; padding: 30px 16px 16px; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <span class="logo">♟️</span>
+    <span class="brand">BoardGame Search India</span>
+    <div class="search-bar">
+      <input type="search" id="search-input" placeholder="Search games, e.g. Catan, Pandemic…"
+        autocomplete="off" autocorrect="off" spellcheck="false">
+      <button id="search-btn">Search</button>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <!-- Site filter -->
+  <div class="filter-bar" id="filter-bar">
+    <span class="filter-label">Sites:</span>
+    <!-- pills injected by JS -->
+  </div>
+
+  <!-- Home / discovery panel -->
+  <div id="home-panel">
+    <div class="section-title">Popular games</div>
+    <div class="chips" id="popular-chips"></div>
+
+    <div class="section-title">Browse by category</div>
+    <div class="chips" id="category-chips"></div>
+  </div>
+
+  <!-- Results panel -->
+  <div id="results-panel">
+
+    <div id="loading-block" class="loading-wrap" style="display:none">
+      <div class="spinner"></div>
+      <div class="loading-text">Searching all stores…</div>
+      <div class="loading-sites" id="loading-sites"></div>
+    </div>
+
+    <div id="results-content" style="display:none">
+      <div style="display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
+        <div class="results-meta" id="results-meta"></div>
+        <div class="view-toggle">
+          <button class="view-btn active" id="view-combined" onclick="setView('combined')">All</button>
+          <button class="view-btn" id="view-bysite" onclick="setView('bysite')">By Store</button>
+        </div>
+        <div class="sort-bar">
+          <label>Sort:</label>
+          <select id="sort-select" onchange="renderResults()">
+            <option value="default">Relevance</option>
+            <option value="price-asc">Price: Low → High</option>
+            <option value="price-desc">Price: High → Low</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Combined all-results view -->
+      <div id="combined-view">
+        <div class="product-grid" id="all-results-grid"></div>
+      </div>
+
+      <!-- By-site view -->
+      <div id="bysite-view" style="display:none"></div>
+    </div>
+
+  </div>
+
+</main>
+
+<footer>Results are fetched live from each store &nbsp;·&nbsp; Prices shown include taxes where listed</footer>
+
+<script>
+const SITES_META = {};
+const POPULAR = [
+  "Catan","Ticket to Ride","Pandemic","Carcassonne","Wingspan",
+  "Azul","Codenames","Root","7 Wonders","Terraforming Mars",
+  "Chess","Scrabble","Jenga","Uno","Dixit","Splendor",
+  "Forbidden Island","Coup","Exploding Kittens","Sushi Go"
+];
+const CATEGORIES = [
+  {label:"Strategy",q:"strategy board game"},
+  {label:"Family",q:"family board game"},
+  {label:"Card Game",q:"card game"},
+  {label:"Party Game",q:"party game"},
+  {label:"Puzzle",q:"puzzle"},
+  {label:"Cooperative",q:"cooperative board game"},
+  {label:"2-Player",q:"two player board game"},
+  {label:"Children",q:"kids board game"},
+];
+
+let lastResults = null;
+let currentView = "combined";
+let selectedSites = new Set();
+
+// ── Init ──
+async function init() {
+  const res = await fetch("/api/sites");
+  const sites = await res.json();
+  sites.forEach(s => {
+    SITES_META[s.id] = s;
+    selectedSites.add(s.id);
+  });
+  renderFilterBar(sites);
+
+  // Popular chips
+  const pc = document.getElementById("popular-chips");
+  POPULAR.forEach(g => {
+    const el = document.createElement("button");
+    el.className = "chip"; el.textContent = g;
+    el.onclick = () => doSearch(g);
+    pc.appendChild(el);
+  });
+
+  // Category chips
+  const cc = document.getElementById("category-chips");
+  CATEGORIES.forEach(c => {
+    const el = document.createElement("button");
+    el.className = "chip"; el.textContent = c.label;
+    el.onclick = () => doSearch(c.q);
+    cc.appendChild(el);
+  });
+
+  // Search events
+  document.getElementById("search-btn").onclick = () => doSearch();
+  document.getElementById("search-input").addEventListener("keydown", e => {
+    if (e.key === "Enter") doSearch();
+  });
+
+  // URL param support
+  const params = new URLSearchParams(location.search);
+  if (params.get("q")) doSearch(params.get("q"));
+}
+
+function renderFilterBar(sites) {
+  const bar = document.getElementById("filter-bar");
+  // clear existing pills
+  bar.querySelectorAll(".site-pill").forEach(el => el.remove());
+  sites.forEach(s => {
+    const pill = document.createElement("button");
+    pill.className = "site-pill active";
+    pill.dataset.siteId = s.id;
+    pill.style.background = s.color;
+    pill.style.borderColor = s.color;
+    pill.style.color = "white";
+    pill.textContent = s.name;
+    pill.onclick = () => toggleSite(s.id, pill, s.color);
+    bar.appendChild(pill);
+  });
+}
+
+function toggleSite(id, pill, color) {
+  if (selectedSites.has(id)) {
+    if (selectedSites.size === 1) return; // keep at least one
+    selectedSites.delete(id);
+    pill.classList.remove("active");
+    pill.style.background = "";
+    pill.style.borderColor = "var(--border)";
+    pill.style.color = color;
+  } else {
+    selectedSites.add(id);
+    pill.classList.add("active");
+    pill.style.background = color;
+    pill.style.borderColor = color;
+    pill.style.color = "white";
+  }
+  if (lastResults) renderResults();
+}
+
+// ── Search ──
+async function doSearch(q) {
+  const input = document.getElementById("search-input");
+  if (q !== undefined) input.value = q;
+  const query = input.value.trim();
+  if (!query) return;
+
+  document.getElementById("home-panel").style.display = "none";
+  document.getElementById("results-panel").style.display = "block";
+  document.getElementById("loading-block").style.display = "block";
+  document.getElementById("results-content").style.display = "none";
+  document.getElementById("search-btn").disabled = true;
+
+  const sitesParam = [...selectedSites].join(",");
+  document.getElementById("loading-sites").textContent =
+    "Checking: " + [...selectedSites].map(id => SITES_META[id]?.name || id).join(", ") + "…";
+
+  try {
+    const url = `/api/search?q=${encodeURIComponent(query)}&sites=${encodeURIComponent(sitesParam)}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    lastResults = data;
+    renderResults();
+  } catch (err) {
+    document.getElementById("loading-block").style.display = "none";
+    document.getElementById("results-content").style.display = "block";
+    document.getElementById("all-results-grid").innerHTML =
+      `<div class="error-card">Network error: ${err.message}</div>`;
+  } finally {
+    document.getElementById("search-btn").disabled = false;
+    document.getElementById("loading-block").style.display = "none";
+    document.getElementById("results-content").style.display = "block";
+  }
+}
+
+// ── Render ──
+function setView(v) {
+  currentView = v;
+  document.getElementById("view-combined").classList.toggle("active", v === "combined");
+  document.getElementById("view-bysite").classList.toggle("active", v === "bysite");
+  document.getElementById("combined-view").style.display = v === "combined" ? "" : "none";
+  document.getElementById("bysite-view").style.display = v === "bysite" ? "" : "none";
+  if (lastResults) renderResults();
+}
+
+function parsePrice(priceStr) {
+  if (!priceStr) return null;
+  const n = parseFloat(priceStr.replace(/[^\d.]/g, ""));
+  return isNaN(n) ? null : n;
+}
+
+function sortItems(items) {
+  const sort = document.getElementById("sort-select").value;
+  if (sort === "price-asc") {
+    return [...items].sort((a, b) => {
+      const pa = parsePrice(a.price), pb = parsePrice(b.price);
+      if (pa == null && pb == null) return 0;
+      if (pa == null) return 1; if (pb == null) return -1;
+      return pa - pb;
+    });
+  }
+  if (sort === "price-desc") {
+    return [...items].sort((a, b) => {
+      const pa = parsePrice(a.price), pb = parsePrice(b.price);
+      if (pa == null && pb == null) return 0;
+      if (pa == null) return 1; if (pb == null) return -1;
+      return pb - pa;
+    });
+  }
+  return items;
+}
+
+function makeCard(item) {
+  const a = document.createElement("a");
+  a.className = "product-card";
+  a.href = item.url || "#";
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+
+  const imgHtml = item.image
+    ? `<img class="product-img" src="${escHtml(item.image)}" alt="${escHtml(item.title)}" loading="lazy"
+         onerror="this.outerHTML='<div class=\'product-img-placeholder\'>🎲</div>'">`
+    : `<div class="product-img-placeholder">🎲</div>`;
+
+  const priceHtml = item.price
+    ? `<span class="product-price">${escHtml(item.price)}</span>`
+    : `<span class="product-price no-price">Price not listed</span>`;
+
+  const siteColor = SITES_META[item.site_id]?.color || "#666";
+  const siteName = item.site || item.site_id || "";
+
+  a.innerHTML = `
+    ${imgHtml}
+    <div class="product-info">
+      <div class="product-title">${escHtml(item.title)}</div>
+      ${priceHtml}
+      <span class="product-site-tag" style="color:${siteColor}; background:${siteColor}18">${escHtml(siteName)}</span>
+    </div>`;
+  return a;
+}
+
+function escHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function renderResults() {
+  if (!lastResults) return;
+  const data = lastResults;
+  const query = data.query;
+
+  // Filter to selected sites
+  const allItems = (data.all_items || []).filter(i => selectedSites.has(i.site_id));
+  const sorted = sortItems(allItems);
+
+  // Meta line
+  const priceItems = allItems.filter(i => i.price);
+  let metaText = `<strong>${allItems.length}</strong> result${allItems.length !== 1 ? "s" : ""} for "<strong>${escHtml(query)}</strong>"`;
+  if (priceItems.length) {
+    const prices = priceItems.map(i => parsePrice(i.price)).filter(Boolean);
+    const min = Math.min(...prices), max = Math.max(...prices);
+    if (min !== max) metaText += ` &nbsp;·&nbsp; Prices: ₹${min.toLocaleString("en-IN")} – ₹${max.toLocaleString("en-IN")}`;
+    else metaText += ` &nbsp;·&nbsp; Price: ₹${min.toLocaleString("en-IN")}`;
+  }
+  metaText += ` &nbsp;·&nbsp; ${data.total_time}s`;
+  document.getElementById("results-meta").innerHTML = metaText;
+
+  // ── Combined view ──
+  const grid = document.getElementById("all-results-grid");
+  grid.innerHTML = "";
+  if (sorted.length === 0) {
+    grid.innerHTML = `<div class="no-results">No products found. Try a different search term or check the store filter.</div>`;
+  } else {
+    sorted.forEach(item => grid.appendChild(makeCard(item)));
+  }
+
+  // ── By-site view ──
+  const bySite = document.getElementById("bysite-view");
+  bySite.innerHTML = "";
+  const bySiteData = data.by_site || {};
+  Object.entries(bySiteData).forEach(([siteId, siteData]) => {
+    if (!selectedSites.has(siteId)) return;
+    const meta = SITES_META[siteId] || {};
+    const items = sortItems((siteData.items || []).filter(Boolean));
+
+    const section = document.createElement("div");
+    section.className = "site-section";
+
+    const pricesInSite = items.filter(i => i.price).map(i => parsePrice(i.price)).filter(Boolean);
+    let priceRange = "";
+    if (pricesInSite.length) {
+      const mn = Math.min(...pricesInSite), mx = Math.max(...pricesInSite);
+      priceRange = mn === mx
+        ? `₹${mn.toLocaleString("en-IN")}`
+        : `₹${mn.toLocaleString("en-IN")} – ₹${mx.toLocaleString("en-IN")}`;
+    }
+
+    section.innerHTML = `
+      <div class="site-header">
+        <div class="site-dot" style="background:${meta.color || '#888'}"></div>
+        <span class="site-header-name">${escHtml(meta.name || siteId)}</span>
+        <span class="site-header-count">${items.length} result${items.length !== 1 ? "s" : ""}</span>
+        ${priceRange ? `<span class="price-range-badge">${priceRange}</span>` : ""}
+        ${siteData.error ? `<span style="font-size:11px;color:var(--danger)">⚠ ${escHtml(siteData.error)}</span>` : ""}
+        <a class="site-header-link" href="${meta.url || '#'}" target="_blank" rel="noopener">Visit store →</a>
+      </div>`;
+
+    if (items.length === 0) {
+      section.innerHTML += `<div class="no-results">No results found on this store.</div>`;
+    } else {
+      const grid2 = document.createElement("div");
+      grid2.className = "product-grid";
+      items.forEach(item => grid2.appendChild(makeCard(item)));
+      section.appendChild(grid2);
+    }
+
+    bySite.appendChild(section);
+  });
+}
+
+init();
+</script>
+</body>
+</html>
