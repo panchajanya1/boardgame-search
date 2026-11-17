@@ -250,6 +250,8 @@
       </div>
 
       <!-- Combined all-results view -->
+      <div id="store-errors"></div>
+
       <div id="combined-view">
         <div class="product-grid" id="all-results-grid"></div>
       </div>
@@ -441,8 +443,7 @@ function makeCard(item) {
   a.rel = "noopener noreferrer";
 
   const imgHtml = item.image
-    ? `<img class="product-img" src="${escHtml(item.image)}" alt="${escHtml(item.title)}" loading="lazy"
-         onerror="this.outerHTML='<div class=\'product-img-placeholder\'>🎲</div>'">`
+    ? `<img class="product-img" src="${escHtml(item.image)}" alt="${escHtml(item.title)}" loading="lazy">`
     : `<div class="product-img-placeholder">🎲</div>`;
 
   const priceHtml = item.price
@@ -459,6 +460,18 @@ function makeCard(item) {
       ${priceHtml}
       <span class="product-site-tag" style="color:${siteColor}; background:${siteColor}18">${escHtml(siteName)}</span>
     </div>`;
+
+  // Swap a broken image for the 🎲 placeholder (attached here rather than as an
+  // inline onerror attribute, which needed fragile nested quote escaping).
+  const img = a.querySelector("img.product-img");
+  if (img) {
+    img.addEventListener("error", () => {
+      const ph = document.createElement("div");
+      ph.className = "product-img-placeholder";
+      ph.textContent = "🎲";
+      img.replaceWith(ph);
+    }, { once: true });
+  }
   return a;
 }
 
@@ -493,6 +506,15 @@ function renderResults() {
   // ── Combined view ──
   const grid = document.getElementById("all-results-grid");
   grid.innerHTML = "";
+
+  // Stores that failed (blocked, timed out, layout changed) are listed so a
+  // failure isn't mistaken for "no results".
+  const errorBox = document.getElementById("store-errors");
+  const failed = Object.entries(data.by_site || {})
+    .filter(([id, sd]) => selectedSites.has(id) && sd.error);
+  errorBox.innerHTML = failed.map(([id, sd]) =>
+    `<div class="error-card">⚠ ${escHtml(SITES_META[id]?.name || id)}: ${escHtml(sd.error)}</div>`
+  ).join("");
   if (sorted.length === 0) {
     grid.innerHTML = `<div class="no-results">No products found. Try a different search term or check the store filter.</div>`;
   } else {
