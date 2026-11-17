@@ -4,12 +4,14 @@ Run: python app.py
 Open: http://localhost:5000  (or http://YOUR_PC_IP:5000 on iPhone)
 """
 
+import copy
 import threading
 import json
 import re
 import time
 import socket
 import logging
+from urllib.parse import urljoin
 from flask import Flask, render_template, request, jsonify
 import requests
 from bs4 import BeautifulSoup
@@ -68,14 +70,36 @@ def normalize_title(title):
     return " ".join(title.split())
 
 
+class ScraperError(Exception):
+    """Raised when a store can't be searched, so the UI can show why."""
+
+
+BLOCK_MARKERS = (
+    "cf-browser-verification",
+    "challenge-platform",
+    "<title>Just a moment...</title>",
+    "Attention Required! | Cloudflare",
+)
+
+
 def get_page(url, timeout=TIMEOUT):
+    """Fetch a page and return its HTML. Raises ScraperError on any failure
+    (network error, HTTP error, bot-protection page) instead of returning
+    None, so a blocked store isn't silently reported as "no results"."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
-        r.raise_for_status()
-        return r.text
-    except Exception as e:
-        log.warning(f"GET {url} failed: {e}")
-        return None
+    except requests.Timeout:
+        raise ScraperError("Store took too long to respond")
+    except requests.RequestException as e:
+        raise ScraperError(f"Could not reach store ({type(e).__name__})")
+
+    if r.status_code in (403, 429, 503) and any(m in r.text for m in BLOCK_MARKERS):
+        raise ScraperError(f"Store blocked the request (HTTP {r.status_code}, bot protection)")
+    if r.status_code >= 400:
+        raise ScraperError(f"Store returned HTTP {r.status_code}")
+    if any(m in r.text for m in BLOCK_MARKERS):
+        raise ScraperError("Store returned a bot-protection page")
+    return r.text
 
 
 # ──────────────────────────────────────────────
@@ -83,83 +107,67 @@ def get_page(url, timeout=TIMEOUT):
 # ──────────────────────────────────────────────
 
 
-
 def scrape_shopify_json(site_name, site_id, base_url, query):
     results = []
+    url = (
+        f"{base_url}/search/suggest.json"
+        f"?q={requests.utils.quote(query)}"
+        f"&resources[type]=product"
+        f"&resources[limit]=20"
+    )
 
     try:
-        url = (
-                f"{base_url}/search/suggest.json"
-                f"?q={requests.utils.quote(query)}"
-                f"&resources[type]=product"
-                f"&resources[limit]=20"
-                )
-
-       
-
-        r = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=TIMEOUT,
-        )
-
-        r.raise_for_status()
-
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    except requests.Timeout:
+        raise ScraperError("Store took too long to respond")
+    except requests.RequestException as e:
+        raise ScraperError(f"Could not reach store ({type(e).__name__})")
+    if r.status_code >= 400:
+        raise ScraperError(f"Store returned HTTP {r.status_code}")
+    try:
         data = r.json()
+    except ValueError:
+        raise ScraperError("Store returned an unexpected (non-JSON) response")
 
-        products = (
-            data.get("resources", {})
-                .get("results", {})
-                .get("products", [])
-        )
+    products = (
+        data.get("resources", {})
+            .get("results", {})
+            .get("products", [])
+    )
 
-        for p in products:
+    for p in products:
+        title = p.get("title")
+        if not title:
+            continue
 
-            title = p.get("title")
-            if not title:
-                continue
+        try:
+            price = f"₹{float(p.get('price', 0)):,.0f}"
+        except (TypeError, ValueError):
+            price = None
 
-            try:
-                price = f"₹{float(p.get('price', 0)):,.0f}"
-            except Exception:
-                price = None
+        featured = p.get("featured_image")
+        if isinstance(featured, dict):
+            image = featured.get("url")
+        elif isinstance(featured, str):
+            image = featured
+        else:
+            image = p.get("image")
 
-            featured = p.get("featured_image")
+        product_url = p.get("url", "")
+        results.append({
+            "site": site_name,
+            "site_id": site_id,
+            "title": title,
+            "price": price,
+            "image": image,
+            "url": (
+                product_url
+                if product_url.startswith("http")
+                else base_url + product_url
+            ),
+        })
 
-            if isinstance(featured, dict):
-                image = featured.get("url")
-            elif isinstance(featured, str):
-                image = featured
-            else:
-                image = p.get("image")
-            
-            
-            
-          
-
-            product_url = p.get("url", "")
-
-            results.append({
-                "site": site_name,
-                "site_id": site_id,
-                "title": title,
-                "price": price,
-                "image": image,
-                "url": (
-                    product_url
-                    if product_url.startswith("http")
-                    else base_url + product_url
-                )
-            })
-
-            
-            
-
-        return results
-
-    except Exception as e:
-        log.warning(f"{site_name}: {e}")
-        return []
+    return results
 
 def scrape_tma(query):
     return scrape_shopify_json(
@@ -178,96 +186,49 @@ def scrape_satyam(query):
     )
 
 
-
 def scrape_bgfinder(query):
-
     global BGFINDER_CACHE
 
-    results = []
+    if BGFINDER_CACHE is None:
+        log.info("Loading BGFinder dataset...")
+        html = get_page("https://bgfindertool.com/")
 
-    try:
+        soup = BeautifulSoup(html, "html.parser")
+        data_tag = soup.find("script", {"id": "products-data"})
+        if not data_tag or not data_tag.string:
+            raise ScraperError("BGFinder page layout changed (products-data not found)")
 
-        if BGFINDER_CACHE is None:
-
-            log.info("Loading BGFinder dataset...")
-
-            html = get_page("https://bgfindertool.com/")
-            
-            print("BG1 HTML:", html is not None)
-            print("BG1 HTML length:", len(html) if html else 0)
-
-            if not html:
-                return results
-
-            soup = BeautifulSoup(html, "html.parser")
-
-            data_tag = soup.find(
-                "script",
-                {"id": "products-data"}
-            )
-
-            print("BG2 products-data found:", data_tag is not None)
-
-            if not data_tag:
-                log.warning("BGFinder: products-data not found")
-                return results
-
+        try:
             BGFINDER_CACHE = json.loads(data_tag.string)
+        except ValueError:
+            raise ScraperError("BGFinder product data could not be parsed")
+        log.info(f"BGFinder cache loaded: {len(BGFINDER_CACHE)} products")
 
-            print("BG3 cache size:", len(BGFINDER_CACHE))
+    results = []
+    words = query.lower().split()
 
-            log.info(
-                f"BGFinder cache loaded: {len(BGFINDER_CACHE)} products"
-            )
+    for p in BGFINDER_CACHE:
+        name = p.get("name", "")
+        if not all(word in name.lower() for word in words):
+            continue
 
-        products = BGFINDER_CACHE
+        results.append({
+            "site": f"BGFinder → {p.get('store', 'Unknown')}",
+            "site_id": "bgfinder",
+            "title": name,
+            "price": p.get("priceDisplay"),
+            "image": None,
+            "url": p.get("url"),
+            "bgg_rating": p.get("bggRating"),
+            "bgg_rank": p.get("bggRank"),
+            "players_min": p.get("playersMin"),
+            "players_max": p.get("playersMax"),
+            "playtime_min": p.get("playtimeMin"),
+            "playtime_max": p.get("playtimeMax"),
+        })
 
-        query_lower = query.lower()
-
-        for p in products:
-
-            name = p.get("name", "")
-
-            words = query_lower.split()
-
-            if not all(
-                word in name.lower()
-                for word in words
-            ):
-                continue
-            
-            
-            
-            results.append({
-                "site": f"BGFinder → {p.get('store', 'Unknown')}",
-                "site_id": "bgfinder",
-                "title": name,
-                "price": p.get("priceDisplay"),
-                "image": None,
-                "url": p.get("url"),
-                "bgg_rating": p.get("bggRating"),
-                "bgg_rank": p.get("bggRank"),
-                "players_min": p.get("playersMin"),
-                "players_max": p.get("playersMax"),
-                "playtime_min": p.get("playtimeMin"),
-                "playtime_max": p.get("playtimeMax"),
-
-                
-            })
-
-        results.sort(
-            key=lambda x: (
-                x.get("bgg_rank") or 999999
-            )
-        )
-
-        results = results[:50]
-        
-        return results
-
-    except Exception as e:
-        log.warning(f"BGFinder: {e}")
-        return []
+    results.sort(key=lambda x: x.get("bgg_rank") or 999999)
+    return results[:50]
 
 def scrape_jaiman(query):
     return scrape_shopify_json(
@@ -278,43 +239,131 @@ def scrape_jaiman(query):
     )
 
 
+# ── WooCommerce helpers (Shop Befikar) ──
+
+BEFIKAR_BASE = "https://shopbefikar.com"
+
+def woo_price(price_el):
+    """Current price from a WooCommerce `.price` element.
+
+    The element can hold a sale (<del>old</del><ins>new</ins>), a range
+    (₹500 – ₹800) or screen-reader text repeating the prices, so taking its
+    whole text glues several numbers together. Read individual `.amount`
+    nodes instead: the sale price if present, else the first (lowest) amount
+    that isn't struck through."""
+    if price_el is None:
+        return None
+
+    sale = price_el.select_one("ins .amount")
+    if sale:
+        return clean_price(sale.get_text())
+
+    for amount in price_el.select(".amount"):
+        if amount.find_parent("del"):
+            continue
+        return clean_price(amount.get_text())
+
+    # No .amount markup at all (custom theme): only trust plain single prices.
+    for sr in price_el.select(".screen-reader-text"):
+        sr.decompose()
+    text = price_el.get_text(" ", strip=True)
+    if len(re.findall(r"\d[\d,]*(?:\.\d+)?", text)) == 1:
+        return clean_price(text)
+    return None
 
 
+def woo_image(container):
+    """Real image URL, skipping lazy-load placeholders (data: URIs)."""
+    for img in container.select("img"):
+        candidates = [
+            img.get("data-lazy-src"),
+            img.get("data-src"),
+            img.get("data-original"),
+        ]
+        for attr in ("data-lazy-srcset", "data-srcset", "srcset"):
+            srcset = img.get(attr)
+            if srcset:
+                candidates.append(srcset.split(",")[0].strip().split(" ")[0])
+        candidates.append(img.get("src"))
+
+        for c in candidates:
+            if c and not c.startswith("data:"):
+                return urljoin(BEFIKAR_BASE, c)
+    return None
+
+
+def woo_link(card):
+    link = card.select_one("a.woocommerce-LoopProduct-link[href], a.woocommerce-loop-product__link[href]")
+    if link:
+        return link["href"]
+    for a in card.select("a[href]"):
+        href = a["href"]
+        if "add-to-cart" not in href and not href.startswith("#"):
+            return href
+    return None
+
+
+def woo_single_product(soup, fallback_url):
+    """WooCommerce redirects a search with exactly one hit straight to that
+    product's page. Parse the product itself, not the 'Related products'."""
+    title_el = soup.select_one(".product_title, .summary h1, h1.entry-title")
+    if not title_el:
+        return []
+
+    summary = soup.select_one(".summary, .entry-summary") or soup
+    url_el = soup.select_one('link[rel="canonical"], meta[property="og:url"]')
+    url = (url_el.get("href") or url_el.get("content")) if url_el else None
+    gallery = soup.select_one(".woocommerce-product-gallery, .images")
+
+    return [{
+        "site": "Shop Befikar",
+        "site_id": "befikar",
+        "title": title_el.get_text(strip=True),
+        "price": woo_price(summary.select_one(".price")),
+        "image": woo_image(gallery) if gallery else None,
+        "url": url or fallback_url,
+    }]
 
 
 def scrape_befikar(query):
     """Shop Befikar — WooCommerce shop"""
-    results = []
-    url = f"https://shopbefikar.com/?s={requests.utils.quote(query)}&post_type=product"
+    url = f"{BEFIKAR_BASE}/?s={requests.utils.quote(query)}&post_type=product"
     html = get_page(url)
-    if not html:
-        return results
-
     soup = BeautifulSoup(html, "html.parser")
-    cards = soup.select("li.product, .product")[:10]
+
+    body = soup.body
+    body_classes = body.get("class", []) if body else []
+    if "single-product" in body_classes:
+        return woo_single_product(soup, url)
+
+    cards = [
+        c for c in soup.select("ul.products li.product, li.product")
+        if not c.find_parent(class_=["related", "upsells", "cross-sells", "up-sells"])
+    ]
+
+    results = []
     for card in cards:
-        title_el = card.select_one(".woocommerce-loop-product__title, h2, h3")
-        price_el = card.select_one(".price ins .amount, .price .amount, .price")
-        img_el = card.select_one("img")
-        link_el = card.select_one("a[href]")
-
+        title_el = (
+            card.select_one(".woocommerce-loop-product__title")
+            or card.select_one(".product-title, .product-name")
+            or card.select_one("h2, h3")
+        )
         title = title_el.get_text(strip=True) if title_el else None
-        price = clean_price(price_el.get_text() if price_el else "")
-        img = img_el.get("data-src") or img_el.get("src") if img_el else None
-        link = link_el.get("href") if link_el else url
+        if not title:
+            continue
 
-        if title:
-            results.append({
-                "site": "Shop Befikar",
-                "site_id": "befikar",
-                "title": title,
-                "price": price,
-                "image": img,
-                "url": link,
-            })
+        results.append({
+            "site": "Shop Befikar",
+            "site_id": "befikar",
+            "title": title,
+            "price": woo_price(card.select_one(".price")),
+            "image": woo_image(card),
+            "url": urljoin(BEFIKAR_BASE, woo_link(card) or url),
+        })
+        if len(results) >= 20:
+            break
+
     return results
-
-
 
 
 # ──────────────────────────────────────────────
@@ -329,59 +378,69 @@ SCRAPERS = {
     "bgfinder": scrape_bgfinder,
 }
 
+CACHE_LOCK = threading.Lock()
+
 
 def search_all(query, enabled_sites=None):
     if enabled_sites is None:
         enabled_sites = list(SCRAPERS.keys())
+    enabled_sites = [s for s in enabled_sites if s in SCRAPERS]
+
+    cache_key = (query.lower(), tuple(sorted(enabled_sites)))
+    with CACHE_LOCK:
+        cached = SEARCH_CACHE.get(cache_key)
+    if cached and (time.time() - cached["time"]) < CACHE_TTL:
+        return copy.deepcopy(cached["data"])
 
     results_map = {}
-    errors_map = {}
     lock = threading.Lock()
 
-    cache_key = (
-        query.lower(),
-        tuple(sorted(enabled_sites))
-    )
-
-    cached = SEARCH_CACHE.get(cache_key)
-
-    if cached and (time.time() - cached["time"]) < CACHE_TTL:
-        return cached["data"]
-
     def run_scraper(site_id, scraper_fn):
+        start = time.time()
         try:
-            start = time.time()
             items = scraper_fn(query)
-            elapsed = round(time.time() - start, 2)
-            log.info(f"{site_id}: {len(items)} results in {elapsed}s")
-            with lock:
-                results_map[site_id] = {"items": items, "elapsed": elapsed, "error": None}
+            entry = {"items": items, "elapsed": round(time.time() - start, 2), "error": None}
+            log.info(f"{site_id}: {len(items)} results in {entry['elapsed']}s")
+        except ScraperError as e:
+            log.warning(f"{site_id}: {e}")
+            entry = {"items": [], "elapsed": round(time.time() - start, 2), "error": str(e)}
         except Exception as e:
-            log.error(f"{site_id} scraper error: {e}")
-            with lock:
-                results_map[site_id] = {"items": [], "elapsed": 0, "error": str(e)}
+            log.exception(f"{site_id} scraper crashed")
+            entry = {"items": [], "elapsed": round(time.time() - start, 2),
+                     "error": f"Scraper error: {type(e).__name__}: {e}"}
+        with lock:
+            results_map[site_id] = entry
 
     threads = []
     for site_id in enabled_sites:
-        if site_id in SCRAPERS:
-            t = threading.Thread(
-                target=run_scraper, args=(site_id, SCRAPERS[site_id]), daemon=True
-            )
-            threads.append(t)
-            t.start()
+        t = threading.Thread(target=run_scraper, args=(site_id, SCRAPERS[site_id]), daemon=True)
+        threads.append(t)
+        t.start()
 
+    # One shared deadline for all stores (not TIMEOUT+2 per join).
+    deadline = time.time() + TIMEOUT + 2
     for t in threads:
-        t.join(timeout=TIMEOUT + 2)
+        t.join(timeout=max(0, deadline - time.time()))
 
-    if len(SEARCH_CACHE) > 500:
-        SEARCH_CACHE.clear()
-    
-    SEARCH_CACHE[cache_key] = {
-        "time": time.time(),
-        "data": results_map
-    }
+    # Snapshot under the lock: threads that are still running keep writing into
+    # results_map, so the response (and cache) must not share that dict.
+    with lock:
+        snapshot = copy.deepcopy(results_map)
 
-    return results_map
+    for site_id in enabled_sites:
+        if site_id not in snapshot:
+            snapshot[site_id] = {"items": [], "elapsed": TIMEOUT + 2,
+                                 "error": "Store took too long to respond"}
+
+    # Only cache complete, error-free searches; otherwise a slow or flaky store
+    # would stay missing for the whole cache TTL.
+    if all(v["error"] is None for v in snapshot.values()):
+        with CACHE_LOCK:
+            if len(SEARCH_CACHE) > 500:
+                SEARCH_CACHE.clear()
+            SEARCH_CACHE[cache_key] = {"time": time.time(), "data": copy.deepcopy(snapshot)}
+
+    return snapshot
 
 
 # ──────────────────────────────────────────────
