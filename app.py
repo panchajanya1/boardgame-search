@@ -34,6 +34,9 @@ HEADERS = {
 TIMEOUT = 12
 
 BGFINDER_CACHE = None
+BGFINDER_LOADED_AT = 0.0
+BGFINDER_TTL = 6 * 3600  # prices/stock change; re-download a few times a day
+BGFINDER_LOCK = threading.Lock()
 
 SEARCH_CACHE = {}
 CACHE_TTL = 300
@@ -64,10 +67,44 @@ def clean_price(text):
         return None
 
 def normalize_title(title):
-    title = title.lower()
-    title = re.sub(r"\(.*?\)", "", title)
-    title = re.sub(r"[^a-z0-9 ]", "", title)
+    # Keep text in brackets: "(Expansion)" / "(5-6 Players)" is a different
+    # product, and dropping it made those collide with the base game.
+    title = (title or "").lower()
+    title = re.sub(r"[^a-z0-9]+", " ", title)
     return " ".join(title.split())
+
+
+def matches_words(query, text):
+    """Every query word must start a word in the text, so "catan" matches
+    "Catan: Seafarers" but not "Yucatan Card Sleeves"."""
+    tokens = normalize_title(text).split()
+    return all(any(t.startswith(w) for t in tokens) for w in normalize_title(query).split())
+
+
+def phrase_match(query, text):
+    """Whole query appears in the title, starting at a word boundary."""
+    q = normalize_title(query)
+    return bool(q) and re.search(r"(?:^| )" + re.escape(q), normalize_title(text)) is not None
+
+
+def absolute_url(url, base):
+    """Make a store URL absolute (handles "/products/x" and "//cdn/..."),
+    and refuse anything that isn't http(s), e.g. javascript: links."""
+    if not url or not isinstance(url, str):
+        return None
+    url = urljoin(base + "/", url.strip())
+    return url if url.startswith(("http://", "https://")) else None
+
+
+def parse_price_number(value):
+    """Shopify/BGFinder numeric price -> display string; 0/missing -> None."""
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    if val <= 0:
+        return None
+    return f"₹{val:,.0f}"
 
 
 class ScraperError(Exception):
@@ -140,10 +177,7 @@ def scrape_shopify_json(site_name, site_id, base_url, query):
         if not title:
             continue
 
-        try:
-            price = f"₹{float(p.get('price', 0)):,.0f}"
-        except (TypeError, ValueError):
-            price = None
+        price = parse_price_number(p.get("price"))
 
         featured = p.get("featured_image")
         if isinstance(featured, dict):
@@ -153,18 +187,15 @@ def scrape_shopify_json(site_name, site_id, base_url, query):
         else:
             image = p.get("image")
 
-        product_url = p.get("url", "")
+        available = p.get("available")
         results.append({
             "site": site_name,
             "site_id": site_id,
             "title": title,
             "price": price,
-            "image": image,
-            "url": (
-                product_url
-                if product_url.startswith("http")
-                else base_url + product_url
-            ),
+            "image": absolute_url(image, base_url),
+            "url": absolute_url(p.get("url"), base_url) or base_url,
+            "in_stock": available if isinstance(available, bool) else None,
         })
 
     return results
@@ -186,39 +217,75 @@ def scrape_satyam(query):
     )
 
 
-def scrape_bgfinder(query):
-    global BGFINDER_CACHE
+def load_bgfinder():
+    """BGFinder ships its whole catalogue in one JSON blob; download it once
+    and refresh it every BGFINDER_TTL. If a refresh fails, keep serving the
+    previous copy rather than failing every search."""
+    global BGFINDER_CACHE, BGFINDER_LOADED_AT
 
-    if BGFINDER_CACHE is None:
-        log.info("Loading BGFinder dataset...")
-        html = get_page("https://bgfindertool.com/")
-
-        soup = BeautifulSoup(html, "html.parser")
-        data_tag = soup.find("script", {"id": "products-data"})
-        if not data_tag or not data_tag.string:
-            raise ScraperError("BGFinder page layout changed (products-data not found)")
-
+    with BGFINDER_LOCK:
+        fresh = (time.time() - BGFINDER_LOADED_AT) < BGFINDER_TTL
+        if BGFINDER_CACHE is not None and fresh:
+            return BGFINDER_CACHE
         try:
-            BGFINDER_CACHE = json.loads(data_tag.string)
-        except ValueError:
-            raise ScraperError("BGFinder product data could not be parsed")
+            log.info("Loading BGFinder dataset...")
+            html = get_page("https://bgfindertool.com/")
+
+            soup = BeautifulSoup(html, "html.parser")
+            data_tag = soup.find("script", {"id": "products-data"})
+            if not data_tag or not data_tag.string:
+                raise ScraperError("BGFinder page layout changed (products-data not found)")
+            try:
+                data = json.loads(data_tag.string)
+            except ValueError:
+                raise ScraperError("BGFinder product data could not be parsed")
+            if not isinstance(data, list):
+                raise ScraperError("BGFinder product data could not be parsed")
+        except ScraperError:
+            if BGFINDER_CACHE is not None:
+                log.warning("BGFinder refresh failed; using the previous copy")
+                BGFINDER_LOADED_AT = time.time() - BGFINDER_TTL + 600  # retry in 10 min
+                return BGFINDER_CACHE
+            raise
+
+        BGFINDER_CACHE = [p for p in data if isinstance(p, dict)]
+        BGFINDER_LOADED_AT = time.time()
         log.info(f"BGFinder cache loaded: {len(BGFINDER_CACHE)} products")
+        return BGFINDER_CACHE
+
+
+def bgfinder_title(p):
+    """Listing names are cut off ("Adventure Games: Gloom ..."); fall back to
+    the full BGG name when that happens."""
+    name = (p.get("name") or "").strip()
+    primary = (p.get("NamePrimary") or "").strip()
+    if primary and (not name or name.endswith("...") or name.endswith("…")):
+        return primary
+    return name or primary
+
+
+def scrape_bgfinder(query):
+    products = load_bgfinder()
 
     results = []
-    words = query.lower().split()
 
-    for p in BGFINDER_CACHE:
-        name = p.get("name", "")
-        if not all(word in name.lower() for word in words):
+    for p in products:
+        title = bgfinder_title(p)
+        if not title:
+            continue
+        if not matches_words(query, f"{p.get('name') or ''} {p.get('NamePrimary') or ''}"):
             continue
 
+        status = (p.get("status") or "").strip()
         results.append({
-            "site": f"BGFinder → {p.get('store', 'Unknown')}",
+            "site": f"BGFinder → {p.get('store') or 'Unknown'}",
             "site_id": "bgfinder",
-            "title": name,
-            "price": p.get("priceDisplay"),
-            "image": None,
-            "url": p.get("url"),
+            "title": title,
+            "price": p.get("priceDisplay") or parse_price_number(p.get("priceValue")),
+            "image": absolute_url(p.get("Thumbnail") or p.get("Image"), "https://bgfindertool.com"),
+            "url": absolute_url(p.get("url"), "https://bgfindertool.com"),
+            "in_stock": None if not status else status.lower() in ("in stock", "preorder"),
+            "stock_note": status if status.lower() == "preorder" else None,
             "bgg_rating": p.get("bggRating"),
             "bgg_rank": p.get("bggRank"),
             "players_min": p.get("playersMin"),
@@ -227,7 +294,13 @@ def scrape_bgfinder(query):
             "playtime_max": p.get("playtimeMax"),
         })
 
-    results.sort(key=lambda x: x.get("bgg_rank") or 999999)
+    def rank(x):
+        try:
+            return float(x.get("bgg_rank"))
+        except (TypeError, ValueError):
+            return 999999.0
+
+    results.sort(key=rank)
     return results[:50]
 
 def scrape_jaiman(query):
@@ -321,8 +394,24 @@ def woo_single_product(soup, fallback_url):
         "title": title_el.get_text(strip=True),
         "price": woo_price(summary.select_one(".price")),
         "image": woo_image(gallery) if gallery else None,
-        "url": url or fallback_url,
+        "url": absolute_url(url, BEFIKAR_BASE) or fallback_url,
+        "in_stock": woo_in_stock(
+            summary.select_one(".stock"),
+            (soup.select_one(".type-product") or soup).get("class"),
+        ),
     }]
+
+
+def woo_in_stock(stock_el=None, body_classes=None):
+    """True/False from WooCommerce's instock/outofstock markers, None if unknown."""
+    classes = set(body_classes or [])
+    if stock_el is not None:
+        classes |= set(stock_el.get("class", []))
+    if classes & {"outofstock", "out-of-stock"}:
+        return False
+    if classes & {"instock", "in-stock", "onbackorder", "available-on-backorder"}:
+        return True
+    return None
 
 
 def scrape_befikar(query):
@@ -336,8 +425,10 @@ def scrape_befikar(query):
     if "single-product" in body_classes:
         return woo_single_product(soup, url)
 
+    # Classic themes use <ul class="products"><li class="product">; Shop
+    # Befikar's Woodmart theme uses <div class="products"><div class="product">.
     cards = [
-        c for c in soup.select("ul.products li.product, li.product")
+        c for c in soup.select(".products .product, li.product")
         if not c.find_parent(class_=["related", "upsells", "cross-sells", "up-sells"])
     ]
 
@@ -345,6 +436,7 @@ def scrape_befikar(query):
     for card in cards:
         title_el = (
             card.select_one(".woocommerce-loop-product__title")
+            or card.select_one(".wd-entities-title")
             or card.select_one(".product-title, .product-name")
             or card.select_one("h2, h3")
         )
@@ -358,7 +450,8 @@ def scrape_befikar(query):
             "title": title,
             "price": woo_price(card.select_one(".price")),
             "image": woo_image(card),
-            "url": urljoin(BEFIKAR_BASE, woo_link(card) or url),
+            "url": absolute_url(woo_link(card), BEFIKAR_BASE) or url,
+            "in_stock": woo_in_stock(card.select_one(".stock"), card.get("class")),
         })
         if len(results) >= 20:
             break
@@ -452,6 +545,27 @@ def index():
     return render_template("index.html")
 
 
+NO_PRICE = float("inf")
+
+
+def price_value(item):
+    price = item.get("price")
+    if not price:
+        return NO_PRICE
+    try:
+        return float(re.sub(r"[^\d.]", "", price))
+    except ValueError:
+        return NO_PRICE
+
+
+def dedupe_key(item):
+    """Same listing returned twice by a store. Keyed on the product URL
+    (minus tracking query strings like ?_pos=1&_sid=...), falling back to the
+    title, so different editions with similar names are kept apart."""
+    url = (item.get("url") or "").split("?")[0].split("#")[0].rstrip("/")
+    return (item.get("site", ""), url or normalize_title(item.get("title", "")))
+
+
 @app.route("/api/search")
 def api_search():
     query = request.args.get("q", "").strip()
@@ -464,84 +578,47 @@ def api_search():
     if len(query) > 200:
         return jsonify({"error": "Query too long"}), 400
 
+    if enabled is not None and not any(s in SCRAPERS for s in enabled):
+        return jsonify({"error": "No valid stores selected"}), 400
+
     start = time.time()
     results = search_all(query, enabled)
     total_time = round(time.time() - start, 2)
 
     # Flatten all results for a combined view
-    
     all_items = []
     seen = set()
-
-    for site_id, data in results.items():
+    for data in results.values():
         for item in data["items"]:
-
-            key = (
-                normalize_title(
-                    item.get("title", "")
-                ),
-                item.get("site", "")
-            )
-            
-                    
-           
-
+            key = dedupe_key(item)
             if key in seen:
                 continue
-
             seen.add(key)
             all_items.append(item)
 
-    def price_value(item):
-        price = item.get("price")
+    # Relevance: titles containing the query first, then in-stock before
+    # sold-out, then cheapest.
+    all_items.sort(key=lambda x: (
+        not phrase_match(query, x.get("title", "")),
+        x.get("in_stock") is False,
+        price_value(x),
+    ))
 
-        if not price:
-            return 999999999
-
-        try:
-            return float(price.replace("₹", "").replace(",", ""))
-        except:
-            return 999999999
-
-    query_lower = query.lower()
-
-    all_items.sort(
-        key=lambda x: (
-            query_lower not in x["title"].lower(),
-            price_value(x)
-        )
-    )
-
-    best_prices = {}
-
+    # "Best price" only means something when the same game is offered by more
+    # than one store; sold-out listings can't be the best price.
+    offers = {}
     for item in all_items:
-
-        title_key = normalize_title(
-            item.get("title", "")
-        )
-
         price = price_value(item)
-
-        if price >= 999999999:
+        if price == NO_PRICE or item.get("in_stock") is False:
             continue
-
-        if title_key not in best_prices:
-            best_prices[title_key] = price
-        else:
-            best_prices[title_key] = min(
-                best_prices[title_key],
-                price
-            )
+        offers.setdefault(normalize_title(item.get("title", "")), []).append((price, item.get("site")))
 
     for item in all_items:
-
-        title_key = normalize_title(
-            item.get("title", "")
-        )
-
+        group = offers.get(normalize_title(item.get("title", "")), [])
         item["is_best_price"] = (
-            price_value(item)
-            == best_prices.get(title_key)
+            len({site for _, site in group}) > 1
+            and item.get("in_stock") is not False
+            and price_value(item) == min(p for p, _ in group)
         )
 
     return jsonify({
@@ -552,8 +629,6 @@ def api_search():
         "all_items": all_items,
     })
 
-
-    
 
 @app.route("/api/sites")
 def api_sites():

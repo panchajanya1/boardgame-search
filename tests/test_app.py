@@ -256,5 +256,175 @@ class TimeoutAndCacheTests(unittest.TestCase):
             self.assertEqual(list(app.search_all("x", ["tma", "nope"])), ["tma"])
 
 
+WOODMART_CARD = """<div class="wd-product wd-col product-grid-item product type-product {stock}" data-id="1">
+  <div class="wd-product-wrapper product-wrapper">
+    <div class="wd-product-thumb product-element-top">
+      <a class="wd-product-img-link product-image-link" href="https://shopbefikar.com/product/{slug}/">
+        <img src="https://shopbefikar.com/wp-content/uploads/{slug}-430x430.jpg"></a>
+    </div>
+    <h3 class="wd-entities-title"><a href="https://shopbefikar.com/product/{slug}/">{title}</a></h3>
+    <p class="wd-product-stock stock {stocktext}">x</p>
+    <span class="price">""" + SALE + """</span>
+  </div>
+</div>"""
+
+
+class BefikarWoodmartTests(unittest.TestCase):
+    """Shop Befikar's Woodmart theme uses <div class="product"> cards, which
+    the old li.product selector didn't find (every search returned 0)."""
+
+    def test_woodmart_cards_are_parsed(self):
+        html = ('<html><body class="search woocommerce-page theme-woodmart">'
+                '<div class="products wd-products">'
+                + WOODMART_CARD.format(slug="catan", title="Catan", stock="instock", stocktext="in-stock")
+                + WOODMART_CARD.format(slug="uno", title="Uno", stock="outofstock", stocktext="out-of-stock")
+                + "</div></body></html>")
+        with mock.patch.object(app.requests, "get", return_value=fake_response(html)):
+            results = app.scrape_befikar("catan")
+        self.assertEqual([r["title"] for r in results], ["Catan", "Uno"])
+        self.assertEqual(results[0]["price"], "₹2,999")
+        self.assertEqual(results[0]["url"], "https://shopbefikar.com/product/catan/")
+        self.assertEqual(results[0]["image"], "https://shopbefikar.com/wp-content/uploads/catan-430x430.jpg")
+        self.assertIs(results[0]["in_stock"], True)
+        self.assertIs(results[1]["in_stock"], False)
+
+    def test_javascript_link_is_not_used(self):
+        card = CARD.format(slug="a", img="", title="A", price=REGULAR).replace(
+            "https://shopbefikar.com/product/a/", "javascript:alert(1)")
+        with mock.patch.object(app.requests, "get", return_value=fake_response(search_page(card))):
+            r = app.scrape_befikar("a")[0]
+        self.assertTrue(r["url"].startswith("https://shopbefikar.com/"))
+
+
+class ShopifyTests(unittest.TestCase):
+
+    def scrape(self, products):
+        data = {"resources": {"results": {"products": products}}}
+        with mock.patch.object(app.requests, "get", return_value=fake_response(json_data=data)):
+            return app.scrape_tma("catan")
+
+    def test_fields(self):
+        r = self.scrape([
+            {"title": "Catan", "price": "950.00", "available": True, "url": "/products/catan?_pos=1",
+             "featured_image": {"url": "//cdn.shopify.com/catan.jpg"}},
+            {"title": "Sold", "price": "100.00", "available": False, "url": "/products/sold"},
+            {"title": "Free", "price": "0.00", "url": "/products/free"},
+            {"title": "Missing"},
+        ])
+        self.assertEqual(r[0]["price"], "₹950")
+        self.assertEqual(r[0]["url"], "https://tmaenterprises.co/products/catan?_pos=1")
+        self.assertEqual(r[0]["image"], "https://cdn.shopify.com/catan.jpg")
+        self.assertIs(r[0]["in_stock"], True)
+        self.assertIs(r[1]["in_stock"], False)
+        self.assertIsNone(r[2]["price"], "a missing/zero price used to show as ₹0")
+        self.assertIsNone(r[3]["price"])
+        self.assertIsNone(r[3]["in_stock"])
+
+
+BGF_DATA = [
+    {"name": "Adventure Games: Gloom ...", "NamePrimary": "Adventure Games: The Gloom City File",
+     "url": "https://x.in/gloom", "priceDisplay": "₹1,500", "status": "In Stock", "store": "BFG",
+     "Thumbnail": "https://cf.geekdo-images.com/gloom.jpg", "bggRank": 7319.0},
+    {"name": "Yucatan Card Sleeves", "url": "https://x.in/sleeves", "priceDisplay": "₹259",
+     "status": "In Stock", "store": "BGI"},
+    {"name": "CATAN", "url": "https://x.in/catan", "priceDisplay": "₹2,999", "status": "Preorder",
+     "store": "Owls", "bggRank": None},
+    {"name": "Catan Seafarers", "url": "https://x.in/sea", "priceDisplay": "₹1,999",
+     "status": "In Stock", "store": "Owls", "bggRank": 500.0},
+]
+
+
+def bgf_page(data):
+    return ('<html><script id="products-data" type="application/json">'
+            + app.json.dumps(data) + "</script></html>")
+
+
+class BGFinderTests(unittest.TestCase):
+
+    def setUp(self):
+        self.p1 = mock.patch.object(app, "BGFINDER_CACHE", None)
+        self.p2 = mock.patch.object(app, "BGFINDER_LOADED_AT", 0.0)
+        self.p1.start(); self.p2.start()
+
+    def tearDown(self):
+        self.p1.stop(); self.p2.stop()
+
+    def search(self, q):
+        with mock.patch.object(app.requests, "get", return_value=fake_response(bgf_page(BGF_DATA))):
+            return app.scrape_bgfinder(q)
+
+    def test_truncated_name_is_searchable_and_shown_in_full(self):
+        r = self.search("gloom city")
+        self.assertEqual([x["title"] for x in r], ["Adventure Games: The Gloom City File"])
+        self.assertEqual(r[0]["image"], "https://cf.geekdo-images.com/gloom.jpg")
+
+    def test_matches_whole_words_only(self):
+        titles = [x["title"] for x in self.search("catan")]
+        self.assertNotIn("Yucatan Card Sleeves", titles)
+        self.assertEqual(titles, ["Catan Seafarers", "CATAN"])  # ranked, None rank last
+
+    def test_preorder_note(self):
+        r = {x["title"]: x for x in self.search("catan")}
+        self.assertEqual(r["CATAN"]["stock_note"], "Preorder")
+        self.assertIsNone(r["Catan Seafarers"]["stock_note"])
+
+    def test_dataset_is_refreshed_and_kept_on_failure(self):
+        self.search("catan")
+        with mock.patch.object(app, "BGFINDER_LOADED_AT", time.time() - app.BGFINDER_TTL - 1):
+            with mock.patch.object(app.requests, "get", return_value=fake_response("down", status=500)):
+                self.assertEqual(len(app.scrape_bgfinder("catan")), 2, "stale copy should be served")
+            newer = BGF_DATA + [{"name": "Catan Junior", "url": "https://x.in/jr", "status": "In Stock"}]
+            app.BGFINDER_LOADED_AT = time.time() - app.BGFINDER_TTL - 1
+            with mock.patch.object(app.requests, "get", return_value=fake_response(bgf_page(newer))):
+                self.assertEqual(len(app.scrape_bgfinder("catan")), 3)
+
+
+class ApiMergeTests(unittest.TestCase):
+
+    def setUp(self):
+        app.SEARCH_CACHE.clear()
+
+    def api(self, by_site, q="catan"):
+        scrapers = {sid: (lambda items: lambda query: items)(items) for sid, items in by_site.items()}
+        with mock.patch.dict(app.SCRAPERS, scrapers, clear=True), mock.patch.object(app, "TIMEOUT", 5):
+            return app.app.test_client().get(f"/api/search?q={q}").get_json()
+
+    @staticmethod
+    def item(site, title, price, url, in_stock=True):
+        return {"site": site, "site_id": site.lower(), "title": title, "price": price,
+                "url": url, "in_stock": in_stock}
+
+    def test_expansion_not_merged_with_base_game(self):
+        body = self.api({"tma": [
+            self.item("TMA", "Catan", "₹950", "https://t/catan"),
+            self.item("TMA", "Catan (5-6 Player Extension)", "₹499", "https://t/ext"),
+            self.item("TMA", "Catan", "₹950", "https://t/catan?_pos=2"),  # true duplicate
+        ]})
+        self.assertEqual(sorted(i["title"] for i in body["all_items"]),
+                         ["Catan", "Catan (5-6 Player Extension)"])
+
+    def test_best_price_needs_two_stores_and_stock(self):
+        body = self.api({
+            "tma": [self.item("TMA", "Catan", "₹950", "https://t/catan"),
+                    self.item("TMA", "Uno", "₹99", "https://t/uno")],
+            "jaiman": [self.item("Jaiman", "CATAN", "₹800", "https://j/catan", in_stock=False),
+                       self.item("Jaiman", "Catan!", "₹1,200", "https://j/catan2")],
+        })
+        best = {(i["site"], i["title"]) for i in body["all_items"] if i["is_best_price"]}
+        self.assertEqual(best, {("TMA", "Catan")})
+
+    def test_relevance_word_boundary_and_sold_out_last(self):
+        body = self.api({"tma": [
+            self.item("TMA", "Yucatan", "₹10", "https://t/y"),
+            self.item("TMA", "Catan Sold Out", "₹20", "https://t/s", in_stock=False),
+            self.item("TMA", "Catan", "₹900", "https://t/c"),
+        ]})
+        self.assertEqual([i["title"] for i in body["all_items"]], ["Catan", "Catan Sold Out", "Yucatan"])
+
+    def test_no_valid_sites_is_an_error(self):
+        r = app.app.test_client().get("/api/search?q=catan&sites=nope")
+        self.assertEqual(r.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

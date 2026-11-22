@@ -19,6 +19,7 @@
     --price-bg: #f0fdf4;
     --price-text: #15803d;
     --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+    --error-bg: #fff5f5; --error-border: #fed7d7;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -26,6 +27,7 @@
       --text: #ebebeb; --muted: #9a9a9a; --accent: #4ade80;
       --accent-light: #14290d; --tag-bg: #1e1e40; --tag-text: #818cf8;
       --price-bg: #0f2a1a; --price-text: #4ade80;
+      --danger: #f87171; --error-bg: #2a1414; --error-border: #5c2626;
     }
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -149,6 +151,14 @@
     font-size: 12px; font-weight: 400; color: var(--muted);
     background: transparent; padding: 0;
   }
+  .badges { display: flex; flex-wrap: wrap; gap: 4px; }
+  .badge { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 10px; }
+  .badge-best { color: var(--price-text); background: var(--price-bg); }
+  .badge-oos { color: var(--danger); background: var(--error-bg); }
+  .badge-note { color: var(--muted); background: var(--bg); border: 1px solid var(--border); }
+  .product-card.sold-out .product-img { opacity: 0.55; }
+  .home-link { display: flex; align-items: center; gap: 12px; color: inherit;
+    text-decoration: none; }
   .product-site-tag {
     font-size: 11px; color: var(--tag-text); background: var(--tag-bg);
     padding: 2px 7px; border-radius: 10px; align-self: flex-start;
@@ -169,7 +179,7 @@
   .loading-sites { font-size: 12px; color: var(--muted); margin-top: 6px; }
 
   .error-card {
-    background: #fff5f5; border: 1px solid #fed7d7; border-radius: 10px;
+    background: var(--error-bg); border: 1px solid var(--error-border); border-radius: 10px;
     padding: 14px 16px; font-size: 13px; color: var(--danger); margin-bottom: 12px;
   }
   .no-results { font-size: 14px; color: var(--muted); padding: 12px 0; }
@@ -196,8 +206,10 @@
 
 <header>
   <div class="header-inner">
-    <span class="logo">♟️</span>
-    <span class="brand">BoardGame Search India</span>
+    <a class="home-link" href="/" id="home-link">
+      <span class="logo">♟️</span>
+      <span class="brand">BoardGame Search India</span>
+    </a>
     <div class="search-bar">
       <input type="search" id="search-input" placeholder="Search games, e.g. Catan, Pandemic…"
         autocomplete="off" autocorrect="off" spellcheck="false">
@@ -288,11 +300,19 @@ const CATEGORIES = [
 let lastResults = null;
 let currentView = "combined";
 let selectedSites = new Set();
+let searchSeq = 0;  // only the newest search may render
 
 // ── Init ──
 async function init() {
-  const res = await fetch("/api/sites");
-  const sites = await res.json();
+  let sites = [];
+  try {
+    const res = await fetch("/api/sites");
+    sites = await res.json();
+  } catch (err) {
+    document.getElementById("filter-bar").insertAdjacentHTML("beforeend",
+      `<span class="error-card" style="margin:0">Could not load store list: ${escHtml(err.message)}</span>`);
+    return;
+  }
   sites.forEach(s => {
     SITES_META[s.id] = s;
     selectedSites.add(s.id);
@@ -323,9 +343,29 @@ async function init() {
     if (e.key === "Enter") doSearch();
   });
 
+  // Logo returns to the home screen; back/forward move between searches.
+  document.getElementById("home-link").onclick = e => {
+    e.preventDefault();
+    if (location.search) history.pushState({}, "", location.pathname);
+    showHome();
+  };
+  window.addEventListener("popstate", () => {
+    const q = new URLSearchParams(location.search).get("q");
+    if (q) doSearch(q, { push: false }); else showHome();
+  });
+
   // URL param support
   const params = new URLSearchParams(location.search);
-  if (params.get("q")) doSearch(params.get("q"));
+  if (params.get("q")) doSearch(params.get("q"), { push: false });
+}
+
+function showHome() {
+  searchSeq++;  // drop any search still in flight
+  lastResults = null;
+  document.getElementById("search-input").value = "";
+  document.getElementById("search-btn").disabled = false;
+  document.getElementById("results-panel").style.display = "none";
+  document.getElementById("home-panel").style.display = "";
 }
 
 function renderFilterBar(sites) {
@@ -360,15 +400,27 @@ function toggleSite(id, pill, color) {
     pill.style.borderColor = color;
     pill.style.color = "white";
   }
-  if (lastResults) renderResults();
+  if (!lastResults) return;
+  // A store switched on after the search has no results yet: search again.
+  if (selectedSites.has(id) && !(id in (lastResults.by_site || {}))) {
+    doSearch(lastResults.query, { push: false });
+  } else {
+    renderResults();
+  }
 }
 
 // ── Search ──
-async function doSearch(q) {
+async function doSearch(q, { push = true } = {}) {
   const input = document.getElementById("search-input");
   if (q !== undefined) input.value = q;
   const query = input.value.trim();
   if (!query) return;
+
+  const seq = ++searchSeq;
+  if (push) {
+    const url = `${location.pathname}?q=${encodeURIComponent(query)}`;
+    if (new URLSearchParams(location.search).get("q") !== query) history.pushState({}, "", url);
+  }
 
   document.getElementById("home-panel").style.display = "none";
   document.getElementById("results-panel").style.display = "block";
@@ -380,22 +432,36 @@ async function doSearch(q) {
   document.getElementById("loading-sites").textContent =
     "Checking: " + [...selectedSites].map(id => SITES_META[id]?.name || id).join(", ") + "…";
 
+  let data = null, errorMsg = null;
   try {
     const url = `/api/search?q=${encodeURIComponent(query)}&sites=${encodeURIComponent(sitesParam)}`;
     const res = await fetch(url);
-    const data = await res.json();
-    lastResults = data;
-    renderResults();
+    try { data = await res.json(); } catch { data = null; }
+    if (!res.ok || !data || data.error) {
+      errorMsg = (data && data.error) || `Server error (HTTP ${res.status})`;
+    }
   } catch (err) {
-    document.getElementById("loading-block").style.display = "none";
-    document.getElementById("results-content").style.display = "block";
-    document.getElementById("all-results-grid").innerHTML =
-      `<div class="error-card">Network error: ${err.message}</div>`;
-  } finally {
-    document.getElementById("search-btn").disabled = false;
-    document.getElementById("loading-block").style.display = "none";
-    document.getElementById("results-content").style.display = "block";
+    errorMsg = `Network error: ${err.message}`;
   }
+
+  // A newer search (or going home) started while this one was loading.
+  if (seq !== searchSeq) return;
+
+  document.getElementById("search-btn").disabled = false;
+  document.getElementById("loading-block").style.display = "none";
+  document.getElementById("results-content").style.display = "block";
+
+  if (errorMsg) {
+    lastResults = null;
+    document.getElementById("results-meta").innerHTML = "";
+    document.getElementById("store-errors").innerHTML = "";
+    document.getElementById("bysite-view").innerHTML = "";
+    document.getElementById("all-results-grid").innerHTML =
+      `<div class="error-card">${escHtml(errorMsg)}</div>`;
+    return;
+  }
+  lastResults = data;
+  renderResults();
 }
 
 // ── Render ──
@@ -435,20 +501,36 @@ function sortItems(items) {
   return items;
 }
 
+// Scraped URLs go into href/src: only allow real web links (no javascript:).
+function safeUrl(url) {
+  if (!url) return null;
+  try {
+    const u = new URL(url, location.href);
+    return (u.protocol === "http:" || u.protocol === "https:") ? u.href : null;
+  } catch { return null; }
+}
+
 function makeCard(item) {
   const a = document.createElement("a");
-  a.className = "product-card";
-  a.href = item.url || "#";
+  a.className = "product-card" + (item.in_stock === false ? " sold-out" : "");
+  a.href = safeUrl(item.url) || "#";
   a.target = "_blank";
   a.rel = "noopener noreferrer";
 
-  const imgHtml = item.image
-    ? `<img class="product-img" src="${escHtml(item.image)}" alt="${escHtml(item.title)}" loading="lazy">`
+  const image = safeUrl(item.image);
+  const imgHtml = image
+    ? `<img class="product-img" src="${escHtml(image)}" alt="${escHtml(item.title)}" loading="lazy" referrerpolicy="no-referrer">`
     : `<div class="product-img-placeholder">🎲</div>`;
 
   const priceHtml = item.price
     ? `<span class="product-price">${escHtml(item.price)}</span>`
     : `<span class="product-price no-price">Price not listed</span>`;
+
+  const badges = [];
+  if (item.is_best_price) badges.push(`<span class="badge badge-best">Best price</span>`);
+  if (item.in_stock === false) badges.push(`<span class="badge badge-oos">Out of stock</span>`);
+  if (item.stock_note) badges.push(`<span class="badge badge-note">${escHtml(item.stock_note)}</span>`);
+  const badgesHtml = badges.length ? `<div class="badges">${badges.join("")}</div>` : "";
 
   const siteColor = SITES_META[item.site_id]?.color || "#666";
   const siteName = item.site || item.site_id || "";
@@ -458,6 +540,7 @@ function makeCard(item) {
     <div class="product-info">
       <div class="product-title">${escHtml(item.title)}</div>
       ${priceHtml}
+      ${badgesHtml}
       <span class="product-site-tag" style="color:${siteColor}; background:${siteColor}18">${escHtml(siteName)}</span>
     </div>`;
 
@@ -479,7 +562,7 @@ function escHtml(str) {
   if (!str) return "";
   return String(str)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 function renderResults() {
@@ -494,8 +577,8 @@ function renderResults() {
   // Meta line
   const priceItems = allItems.filter(i => i.price);
   let metaText = `<strong>${allItems.length}</strong> result${allItems.length !== 1 ? "s" : ""} for "<strong>${escHtml(query)}</strong>"`;
-  if (priceItems.length) {
-    const prices = priceItems.map(i => parsePrice(i.price)).filter(Boolean);
+  const prices = priceItems.map(i => parsePrice(i.price)).filter(Boolean);
+  if (prices.length) {
     const min = Math.min(...prices), max = Math.max(...prices);
     if (min !== max) metaText += ` &nbsp;·&nbsp; Prices: ₹${min.toLocaleString("en-IN")} – ₹${max.toLocaleString("en-IN")}`;
     else metaText += ` &nbsp;·&nbsp; Price: ₹${min.toLocaleString("en-IN")}`;
